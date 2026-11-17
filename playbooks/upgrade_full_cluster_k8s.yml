@@ -1,0 +1,213 @@
+---
+# Control-plane
+- name: Upgrade Kubernetes Cluster - Control Plane
+  hosts: control-plane
+  serial: 1
+  become: yes
+
+  vars_prompt:
+    - name: full_k8s_version
+      prompt: "Enter the Kubernetes version to install in format X.XX.X (e.g., 1.36.6): "
+      private: false
+
+  tasks:
+    - name: You chose version
+      debug:
+        var: full_k8s_version
+
+    - name: Extract major and minor version
+      set_fact:
+        k8s_version: "{{ full_k8s_version.split('.')[0:2] | join('.') }}"
+
+    - name: Update Kubernetes repository configuration
+      block:
+        - name: Create Kubernetes repo file
+          copy:
+            content: |
+              [kubernetes]
+              name=Kubernetes
+              baseurl=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/rpm/
+              enabled=1
+              gpgcheck=1
+              gpgkey=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/rpm/repodata/repomd.xml.key
+              exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+            dest: /etc/yum.repos.d/kubernetes.repo
+
+      tags: update_repo
+
+    - name: Update kubeadm on control plane nodes
+      yum:
+        name: kubeadm-{{ full_k8s_version }}-*
+        state: latest
+        disable_excludes: kubernetes
+
+    - name: Display kubeadm version on control plane nodes
+      command: kubeadm version
+      register: kubeadm_version_output
+
+    - debug:
+        var: kubeadm_version_output.stdout_lines
+
+    - name: Apply kubeadm upgrade - it can take a few minutes
+      command: sudo kubeadm upgrade apply v{{ full_k8s_version }} -y
+      register: kubeadm_apply_upgrade
+
+    - debug:
+        var: kubeadm_apply_upgrade.stdout_lines
+
+    - name: Cordon control plane node
+      command: kubectl cordon {{ groups['control-plane'][0] }} --kubeconfig=/etc/kubernetes/admin.conf
+      when: inventory_hostname in groups['control-plane']
+
+    - name: Pause for a moment
+      pause:
+        seconds: 10
+
+    - name: Drain control plane node
+      command: kubectl drain {{ groups['control-plane'][0] }} --ignore-daemonsets --delete-emptydir-data --kubeconfig=/etc/kubernetes/admin.conf
+      when: inventory_hostname in groups['control-plane']
+
+    - name: Pause for a moment
+      pause:
+        seconds: 120
+
+    - name: Install kubelet and kubectl on control-plane
+      become: yes
+      command: "dnf install -y kubelet-{{ full_k8s_version }}-* kubectl-{{ full_k8s_version }}-* --disableexcludes=kubernetes"
+      register: kubectl_kubelet_upgrade
+
+    - debug:
+        var: kubectl_kubelet_upgrade.stdout_lines
+
+    - name: Set parameters for controlplane
+      lineinfile:
+        path: /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+        regexp: 'ExecStart='
+        line: 'ExecStart=/usr/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS --kube-reserved=cpu=1000m,memory=1000Mi --feature-gates=NodeLogQuery=true'
+
+    - name: Reload systemd and restart kubelet on control-plane
+      systemd:
+        daemon_reload: yes
+      become: yes
+    - command: sudo systemctl restart kubelet
+
+    - name: Uncordon control plane node
+      command: kubectl uncordon {{ groups['control-plane'][0] }} --kubeconfig=/etc/kubernetes/admin.conf
+      when: inventory_hostname in groups['control-plane']
+
+    - name: Wait for 120 seconds
+      pause:
+        seconds: 120
+
+
+# Worker
+- name: Upgrade Kubernetes Cluster - Worker Nodes
+  hosts: worker
+  serial: 1
+  become: yes
+
+  tasks:
+    - name: You chose version
+      debug:
+        var: full_k8s_version
+
+    - name: Extract major and minor version
+      set_fact:
+        k8s_version: "{{ full_k8s_version.split('.')[0:2] | join('.') }}"
+
+    - name: Update Kubernetes repository configuration
+      block:
+        - name: Create Kubernetes repo file
+          copy:
+            content: |
+              [kubernetes]
+              name=Kubernetes
+              baseurl=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/rpm/
+              enabled=1
+              gpgcheck=1
+              gpgkey=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/rpm/repodata/repomd.xml.key
+              exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+            dest: /etc/yum.repos.d/kubernetes.repo
+
+      tags: update_repo
+
+    - name: Update kubeadm on worker nodes
+      yum:
+        name: kubeadm-{{ full_k8s_version }}-*
+        state: latest
+        disable_excludes: kubernetes
+
+    - name: Display kubeadm version on worker nodes
+      command: kubeadm version
+      register: kubeadm_version_output
+
+    - debug:
+        var: kubeadm_version_output.stdout_lines
+
+    - name: Reload Yum Repository Cache
+      command: yum clean all
+      become: yes
+      tags: update_repo
+
+    - name: Apply kubeadm upgrade - it can take a few minutes
+      command: sudo kubeadm upgrade node --kubeconfig=/etc/kubernetes/kubelet.conf
+      register: kubeadm_apply_upgrade2
+
+    - debug:
+        var: kubeadm_apply_upgrade2.stdout_lines
+
+    - name: Cordon worker node
+      command: kubectl cordon {{ inventory_hostname }} --kubeconfig=/etc/kubernetes/admin.conf
+      when: inventory_hostname in groups['worker']
+      delegate_to: "{{ groups['control-plane'][0] }}"
+
+    - name: Pause for a moment
+      pause:
+        seconds: 10
+
+    - name: Drain worker node on control-plane
+      command: kubectl drain {{ inventory_hostname }} --ignore-daemonsets --delete-emptydir-data --disable-eviction --force --kubeconfig=/etc/kubernetes/admin.conf
+      when: "'worker' in group_names"
+      delegate_to: "{{ groups['control-plane'][0] }}"
+      register: cordon_worker_debug
+
+    - debug:
+        var: cordon_worker_debug.stdout_lines
+
+    - name: Pause for a moment
+      pause:
+        seconds: 120
+
+    - name: Install kubelet and kubectl on worker node
+      become: yes
+      command: "dnf install -y kubelet-{{ full_k8s_version }}-* kubectl-{{ full_k8s_version }}-* --disableexcludes=kubernetes"
+      register: kubectl_kubelet_upgrade
+
+    - debug:
+        var: kubectl_kubelet_upgrade.stdout_lines
+
+    - name: Increase max pods on worker
+      lineinfile:
+        path: /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+        regexp: 'ExecStart='
+        line: 'ExecStart=/usr/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS --kube-reserved=cpu=1000m,memory=5000Mi --max-pods=250 --feature-gates=NodeLogQuery=true'
+
+    - name: Disable serializeImagePulls configuration to kubelet config.yaml
+      lineinfile:
+        path: /var/lib/kubelet/config.yaml
+        line: 'serializeImagePulls: false'
+
+    - name: Reload systemd and restart kubelet on all nodes
+      systemd:
+        daemon_reload: yes
+      become: yes
+    - command: sudo systemctl restart kubelet
+
+    - name: Uncordon worker node
+      command: kubectl uncordon {{ inventory_hostname }} --kubeconfig=/etc/kubernetes/admin.conf
+      when: inventory_hostname in groups['worker']
+      delegate_to: "{{ groups['control-plane'][0] }}"
+
+    - name: Wait for 120 seconds
+      pause:
+        seconds: 120

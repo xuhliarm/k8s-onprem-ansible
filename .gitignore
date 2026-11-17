@@ -1,0 +1,27 @@
+# Secrets / credentials
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.kubeconfig
+kubeconfig
+admin.conf
+*.vault.yml
+*.vault.yaml
+
+# Runtime & local files
+*.retry
+*.log
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+
+# Inventory with real target details (example inventory is versioned)
+inventories/production/
+inventories/staging/
