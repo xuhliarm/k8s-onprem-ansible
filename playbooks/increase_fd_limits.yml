@@ -1,0 +1,62 @@
+---
+- name: Increase file descriptor limits for root, containerd, kubelet
+  hosts: worker
+  serial: 1
+  become: yes
+
+  tasks:
+
+    - name: Ensure PAM limits are enabled in sshd
+      lineinfile:
+        path: /etc/pam.d/sshd
+        regexp: '^session\s+required\s+pam_limits.so'
+        line: 'session required pam_limits.so'
+        state: present
+
+    - name: Set root and global nofile limits in /etc/security/limits.conf
+      blockinfile:
+        path: /etc/security/limits.conf
+        block: |
+          root soft nofile 524288
+          root hard nofile 524288
+          * soft nofile 524288
+          * hard nofile 524288
+
+    - name: Create systemd override directory for containerd
+      file:
+        path: /etc/systemd/system/containerd.service.d
+        state: directory
+
+    - name: Apply high FD limits to containerd
+      copy:
+        dest: /etc/systemd/system/containerd.service.d/override.conf
+        content: |
+          [Service]
+          LimitNOFILE=524288
+          LimitNOFILESoft=524288
+
+    - name: Create systemd override directory for kubelet
+      file:
+        path: /etc/systemd/system/kubelet.service.d
+        state: directory
+
+    - name: Apply high FD limits to kubelet
+      copy:
+        dest: /etc/systemd/system/kubelet.service.d/override.conf
+        content: |
+          [Service]
+          LimitNOFILE=1048576
+          LimitNOFILESoft=1048576
+
+    - name: Reload systemd
+      command: systemctl daemon-reload
+
+    - name: Restart containerd
+      service:
+        name: containerd
+        state: restarted
+
+    - name: Restart kubelet
+      service:
+        name: kubelet
+        state: restarted

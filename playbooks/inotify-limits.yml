@@ -1,0 +1,25 @@
+---
+- name: Configure inotify limits on Kubernetes nodes
+  hosts: worker
+  become: yes
+
+  tasks:
+
+    - name: Ensure sysctl config file has correct max_user_watches
+      lineinfile:
+        path: /etc/sysctl.d/99-kubernetes-cri.conf
+        regexp: '^fs\.inotify\.max_user_watches='
+        line: 'fs.inotify.max_user_watches=100000'
+        create: yes
+        state: present
+
+    - name: Ensure sysctl config file has correct max_user_instances
+      lineinfile:
+        path: /etc/sysctl.d/99-kubernetes-cri.conf
+        regexp: '^fs\.inotify\.max_user_instances='
+        line: 'fs.inotify.max_user_instances=100000'
+        create: yes
+        state: present
+
+    - name: Reload sysctl settings from the file
+      command: sysctl -p /etc/sysctl.d/99-kubernetes-cri.conf
